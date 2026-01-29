@@ -107,7 +107,6 @@ def init_routes(app):
         return jsonify({'message': 'Product added', 'id': product.id})
 
     @app.route('/products', methods=['GET'])
-    @login_required
     def list_products():
         products = Product.query.all()
         return jsonify([
