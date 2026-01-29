@@ -1,9 +1,11 @@
+import CORS
 from flask import Flask, jsonify
 from flask_jwt_extended import JWTManager
 from models import db
 from routes import init_routes
 
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///ecommerce.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JWT_SECRET_KEY'] = 'super-secret-key'  # change this in production

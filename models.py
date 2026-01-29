@@ -55,6 +55,8 @@
 #     quantity = db.Column(db.Integer, nullable=False)
 #     price = db.Column(db.Float, nullable=False)
 #     product = db.relationship('Product')
+
+
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from datetime import datetime
