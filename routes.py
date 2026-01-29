@@ -1,208 +1,197 @@
 import os
-from flask import Flask, request, jsonify, send_from_directory
+from flask import request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
+from functools import wraps
 from models import db, User, Category, Product, CartItem, Order, OrderItem
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
-# Use absolute path so Flask can always find the folder
-UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
+UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# ====================== UTILS ======================
+def get_current_user():
+    identity = get_jwt_identity()
+    if not identity:
+        return None
+    return User.query.get(int(identity))  # identity is user ID string
 
-def init_routes(app: Flask):
-    app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+def login_required(f):
+    @wraps(f)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user = get_current_user()
+        if not user:
+            return jsonify({"message": "Login required"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+def admin_required(f):
+    @wraps(f)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        user = get_current_user()
+        if not user or user.role != "admin":
+            return jsonify({"message": "Admin access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+# ====================== ROUTES ======================
+def init_routes(app):
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-    # =====================================================
-    # SERVE UPLOADED IMAGES (OPEN IN BROWSER)
-    # =====================================================
+    # --- Serve images ---
     @app.route('/uploads/<filename>')
     def uploaded_file(filename):
         return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-    # =====================================================
-    # USER CRUD
-    # =====================================================
-    @app.route('/users', methods=['POST'])
-    def create_user():
+    # --- AUTH ---
+    @app.route('/register', methods=['POST'])
+    def register():
         data = request.get_json()
-        user = User(username=data['username'], email=data['email'], role=data.get('role', 'customer'))
+        role = data.get('role', 'customer')
+        user = User(username=data['username'], email=data['email'], role=role)
         user.set_password(data['password'])
         db.session.add(user)
         db.session.commit()
-        return jsonify({'message': 'User created', 'id': user.id})
+        return jsonify({'message': 'Registered successfully', 'role': user.role})
 
-    @app.route('/users', methods=['GET'])
-    def get_users():
-        users = User.query.all()
-        return jsonify([{'id': u.id, 'username': u.username, 'email': u.email, 'role': u.role} for u in users])
-
-    @app.route('/users/<int:user_id>', methods=['PUT'])
-    def update_user(user_id):
-        u = User.query.get(user_id)
-        if not u:
-            return jsonify({'message': 'User not found'}), 404
+    @app.route('/login', methods=['POST'])
+    def login():
         data = request.get_json()
-        u.username = data.get('username', u.username)
-        u.email = data.get('email', u.email)
-        u.role = data.get('role', u.role)
-        if 'password' in data:
-            u.set_password(data['password'])
-        db.session.commit()
-        return jsonify({'message': 'User updated'})
+        user = User.query.filter_by(username=data['username']).first()
+        if user and user.check_password(data['password']):
+            token = create_access_token(identity=str(user.id))  # ID as string
+            return jsonify({'message': 'Login success', 'token': token})
+        return jsonify({'message': 'Invalid credentials'}), 401
 
-    @app.route('/users/<int:user_id>', methods=['DELETE'])
-    def delete_user(user_id):
-        u = User.query.get(user_id)
-        if not u:
-            return jsonify({'message': 'User not found'}), 404
-        db.session.delete(u)
-        db.session.commit()
-        return jsonify({'message': 'User deleted'})
-
-    # =====================================================
-    # CATEGORY CRUD
-    # =====================================================
+    # --- CATEGORY ---
     @app.route('/categories', methods=['POST'])
+    @admin_required
     def create_category():
         data = request.get_json()
-        c = Category(name=data['name'])
-        db.session.add(c)
+        cat = Category(name=data['name'])
+        db.session.add(cat)
         db.session.commit()
-        return jsonify({'message': 'Category created', 'id': c.id})
+        return jsonify({'message': 'Category created'})
 
     @app.route('/categories', methods=['GET'])
-    def get_categories():
+    def list_categories():
         cats = Category.query.all()
         return jsonify([{'id': c.id, 'name': c.name} for c in cats])
 
-    # =====================================================
-    # PRODUCT CRUD WITH IMAGE UPLOAD
-    # =====================================================
+    # --- PRODUCTS ---
     @app.route('/products', methods=['POST'])
+    @admin_required
     def create_product():
         if 'image' not in request.files:
             return jsonify({'message': 'No image uploaded'}), 400
 
         file = request.files['image']
-
-        if file.filename == '':
-            return jsonify({'message': 'No selected file'}), 400
-
-        if not allowed_file(file.filename):
-            return jsonify({'message': 'File type not allowed'}), 400
-
         filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        title = request.form.get('title')
-        description = request.form.get('description')
-        price = float(request.form.get('price', 0))
-        qty = int(request.form.get('qty', 0))
-        category_id = int(request.form.get('category_id'))
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
 
         product = Product(
-            title=title,
-            description=description,
-            price=price,
-            qty=qty,
+            title=request.form['title'],
+            description=request.form['description'],
+            price=float(request.form['price']),
+            qty=int(request.form['qty']),
             image=filename,
-            category_id=category_id
+            category_id=int(request.form['category_id'])
         )
         db.session.add(product)
         db.session.commit()
-
-        image_url = request.host_url + 'uploads/' + filename
-
-        return jsonify({
-            'message': 'Product created',
-            'id': product.id,
-            'image_url': image_url
-        })
+        return jsonify({'message': 'Product added', 'id': product.id})
 
     @app.route('/products', methods=['GET'])
-    def get_products():
+    @login_required
+    def list_products():
         products = Product.query.all()
-        result = []
-
-        for p in products:
-            image_url = request.host_url + 'uploads/' + p.image if p.image else None
-            result.append({
+        return jsonify([
+            {
                 'id': p.id,
                 'title': p.title,
                 'description': p.description,
                 'price': p.price,
                 'qty': p.qty,
-                'image_url': image_url,
+                'image_url': request.host_url + 'uploads/' + p.image if p.image else None,
                 'category_id': p.category_id
-            })
+            } for p in products
+        ])
 
-        return jsonify(result)
+    @app.route('/products/category/<int:cat_id>', methods=['GET'])
+    @login_required
+    def products_by_category(cat_id):
+        products = Product.query.filter_by(category_id=cat_id).all()
+        return jsonify([{'id': p.id, 'title': p.title, 'price': p.price} for p in products])
 
-    @app.route('/products/<int:prod_id>', methods=['DELETE'])
-    def delete_product(prod_id):
-        p = Product.query.get(prod_id)
-        if not p:
-            return jsonify({'message': 'Product not found'}), 404
-
-        # delete image file also
-        if p.image:
-            path = os.path.join(app.config['UPLOAD_FOLDER'], p.image)
-            if os.path.exists(path):
-                os.remove(path)
-
-        db.session.delete(p)
-        db.session.commit()
-        return jsonify({'message': 'Product deleted'})
-
-    # =====================================================
-    # CART CRUD
-    # =====================================================
+    # --- CART ---
     @app.route('/cart', methods=['POST'])
-    def create_cart_item():
+    @login_required
+    def add_to_cart():
+        user = get_current_user()
         data = request.get_json()
-        item = CartItem(user_id=data['user_id'], product_id=data['product_id'], quantity=data.get('quantity', 1))
+        item = CartItem(user_id=user.id, product_id=data['product_id'], quantity=data['quantity'])
         db.session.add(item)
         db.session.commit()
-        return jsonify({'message': 'Cart item created', 'id': item.id})
+        return jsonify({'message': 'Added to cart'})
 
     @app.route('/cart', methods=['GET'])
-    def get_cart_items():
-        items = CartItem.query.all()
-        return jsonify([{'id': i.id, 'user_id': i.user_id, 'product_id': i.product_id, 'quantity': i.quantity} for i in items])
+    @login_required
+    def view_cart():
+        user = get_current_user()
+        items = CartItem.query.filter_by(user_id=user.id).all()
+        return jsonify([{'product_id': i.product_id, 'qty': i.quantity} for i in items])
 
-    # =====================================================
-    # ORDER CRUD
-    # =====================================================
-    @app.route('/orders', methods=['POST'])
-    def create_order():
-        data = request.get_json()
-        order = Order(user_id=data['user_id'], total_price=data['total_price'], status=data.get('status', 'pending'))
+    # --- CHECKOUT ---
+    @app.route('/checkout', methods=['POST'])
+    @login_required
+    def checkout():
+        user = get_current_user()
+        cart_items = CartItem.query.filter_by(user_id=user.id).all()
+        if not cart_items:
+            return jsonify({'message': 'Cart is empty'}), 400
+
+        total = 0
+        order = Order(user_id=user.id, total_price=0)
         db.session.add(order)
-        db.session.commit()
-        return jsonify({'message': 'Order created', 'id': order.id})
+        db.session.flush()
 
-    @app.route('/orders', methods=['GET'])
-    def get_orders():
+        for item in cart_items:
+            product = Product.query.get(item.product_id)
+            if product.qty < item.quantity:
+                return jsonify({'message': f'Not enough stock for {product.title}'}), 400
+
+            product.qty -= item.quantity
+            total += product.price * item.quantity
+
+            order_item = OrderItem(
+                order_id=order.id,
+                product_id=product.id,
+                quantity=item.quantity,
+                price=product.price
+            )
+            db.session.add(order_item)
+            db.session.delete(item)
+
+        order.total_price = total
+        db.session.commit()
+        return jsonify({'message': 'Order placed', 'order_id': order.id})
+
+    # --- TRACK ORDER ---
+    @app.route('/orders/my', methods=['GET'])
+    @login_required
+    def my_orders():
+        user = get_current_user()
+        orders = Order.query.filter_by(user_id=user.id).all()
+        return jsonify([{'id': o.id, 'total': o.total_price, 'status': o.status} for o in orders])
+
+    # --- ADMIN ORDER MANAGEMENT ---
+    @app.route('/admin/orders', methods=['GET'])
+    @admin_required
+    def all_orders():
         orders = Order.query.all()
-        return jsonify([{'id': o.id, 'user_id': o.user_id, 'total_price': o.total_price, 'status': o.status} for o in orders])
-
-    # =====================================================
-    # ORDER ITEMS
-    # =====================================================
-    @app.route('/order-items', methods=['POST'])
-    def create_order_item():
-        data = request.get_json()
-        oi = OrderItem(
-            order_id=data['order_id'],
-            product_id=data['product_id'],
-            quantity=data['quantity'],
-            price=data['price']
-        )
-        db.session.add(oi)
-        db.session.commit()
-        return jsonify({'message': 'Order item created', 'id': oi.id})
+        return jsonify([{'id': o.id, 'user_id': o.user_id, 'total': o.total_price, 'status': o.status} for o in orders])
