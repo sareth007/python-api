@@ -12,10 +12,11 @@ db.init_app(app)
 jwt = JWTManager(app)
 init_routes(app)
 
-with app.app_context():
-    db.create_all()
+# with app.app_context():
+#     db.create_all()
 @app.route('/')
 def hello_world():
+
     return jsonify({
         "status": "ok",
         "message": "API is running"
